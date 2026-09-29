@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "eClass 영상 자동 넘기기",
+  "version": "1.1.0",
+  "description": "서울과기대 eClass 온라인 강의를 1배속으로 재생하고, 끝나면 출석(종료) 후 다음 영상을 자동으로 엽니다.",
+  "permissions": ["scripting"],
+  "host_permissions": ["https://eclass.seoultech.ac.kr/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "eClass 자동 넘기기 켜기/끄기" },
+  "commands": {
+    "toggle": {
+      "suggested_key": { "default": "Alt+Shift+A" },
+      "description": "자동 넘기기 켜기/끄기"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://eclass.seoultech.ac.kr/*"],
+      "js": ["auto.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
