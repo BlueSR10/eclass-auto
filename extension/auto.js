@@ -1,7 +1,6 @@
 // 서울과기대 eClass 영상 자동 넘기기
 // - 목록 화면: 100%가 아닌 첫 영상을 연다. 다 봤으면 왼쪽 목록의 다음 "영상" 항목으로 넘어간다.
-// - 학습 화면: 영상을 재생하고, 끝나면 출석(종료)를 누른다.
-// 재생 속도는 건드리지 않는다(출석인정 시간을 채워야 하므로).
+// - 학습 화면: 출석인정에 모자란 시간만큼 머문 뒤 출석(종료)를 누른다. (학습시간은 재생과 무관하게 쌓임)
 (() => {
   const KEY_ON = "astraAuto.on";
   const KEY_TRIES = "astraAuto.tries";
@@ -114,35 +113,41 @@
   }
 
   // ---- 학습(영상) 화면 ----------------------------------------------------
+  // 학습시간은 영상 재생과 상관없이 이 화면에 머문 시간만큼 쌓인다(사이트의 출석 타이머).
+  // 그래서 목록에서 계산해 둔 "더 채워야 하는 시간"만큼 머문 뒤 출석(종료)를 누른다.
+  // 영상이 다른 도메인 iframe 안에 있어서 접근할 수 없는 과목도 있으므로 영상 상태에 기대지 않는다.
+  const enteredAt = Date.now();
   let exiting = false;
-  let playedSec = 0; // 이 화면에서 실제로 재생된 시간(초)
-  let lastTick = 0;
+  let exitAt = 0; // 이 시각이 되면 출석(종료). 0이면 채울 시간을 모름
   function tickLearning() {
     const frame = document.getElementById("contentViewer");
-    let video;
+    let video = null;
     try { video = frame && frame.contentDocument && frame.contentDocument.querySelector("video"); } catch {}
-    if (!video || !video.duration) return;
 
-    const now = Date.now();
-    if (lastTick && !video.paused && !video.ended) playedSec += (now - lastTick) / 1000;
-    lastTick = now;
-
-    // 목록에서 계산해 둔 "더 채워야 하는 시간"을 다 채웠으면 영상이 안 끝났어도 종료
-    const need = store.get(KEY_NEED, null);
-    const title = document.querySelector(".learning_title")?.textContent.trim();
-    const timeFilled = need && need.title === title && playedSec >= need.sec + MARGIN_SEC;
-
-    const done = timeFilled || video.ended || video.currentTime >= video.duration - 0.5;
+    if (!exitAt) {
+      const need = store.get(KEY_NEED, null);
+      const title = document.querySelector(".learning_title")?.textContent.trim();
+      if (need && need.title === title) {
+        exitAt = enteredAt + (need.sec + MARGIN_SEC) * 1000;
+        const left = Math.max(Math.ceil((exitAt - Date.now()) / 1000), 0);
+        log(`${left}초 뒤 출석(종료) 예정`);
+        toast(`약 ${Math.floor(left / 60)}분 ${left % 60}초 뒤 출석(종료)를 눌러요`);
+      }
+    }
 
     if (shortTimeDeclined) {
-      // 시간이 모자라다고 해서 처음부터 다시 재생
+      // 계산보다 사이트 기록이 적었던 것 → 1분 더 머문 뒤 다시 시도
       shortTimeDeclined = false;
       exiting = false;
-      // 계산보다 사이트 기록이 적었던 것 → 1분 더 채운 뒤 다시 시도
-      playedSec = Math.min(playedSec, need ? need.sec + MARGIN_SEC - 60 : 0);
-      if (video.ended || video.currentTime >= video.duration - 0.5) video.currentTime = 0;
-      toast("출석인정 시간이 모자라서 다시 재생해요");
-    } else if (done) {
+      exitAt = Date.now() + 60000;
+      toast("출석인정 시간이 모자라서 1분 더 기다려요");
+    }
+
+    const timeFilled = exitAt > 0 && Date.now() >= exitAt;
+    // 채울 시간을 모를 때(목록을 거치지 않고 들어온 경우)만 영상이 끝나는 것을 기준으로 한다
+    const videoEnded = !exitAt && !!video && (video.ended || video.currentTime >= video.duration - 0.5);
+
+    if (timeFilled || videoEnded) {
       if (!exiting) {
         exiting = true;
         toast((timeFilled ? "출석인정 시간을 채웠어요" : "영상이 끝났어요") + ". 잠시 후 출석(종료)를 누릅니다");
@@ -152,19 +157,19 @@
           log("출석(종료)");
           markSelfNav(); // 목록으로 돌아가도 OFF 되지 않게
           if (typeof window.exitLearning === "function") window.exitLearning();
-          // exitLearning이 확인창에서 거절되면 shortTimeDeclined가 켜지고 위에서 다시 재생됨
+          // exitLearning이 확인창에서 거절되면 shortTimeDeclined가 켜지고 위에서 1분 더 기다림
           setTimeout(() => { if (!shortTimeDeclined) exiting = false; }, 5000);
         }, 4000);
       }
       return;
     }
 
-    if (video.paused) {
+    // 재생은 덤: 영상에 접근할 수 있으면 틀어둔다 (안 틀어져도 시간은 쌓임)
+    if (video && video.paused && !video.ended) {
       video.play().catch(() => {
         // 브라우저가 소리 있는 자동재생을 막으면 음소거 후 재생
         video.muted = true;
         video.play().catch(() => {});
-        toast("자동재생이 막혀서 음소거로 재생해요");
       });
     }
   }
