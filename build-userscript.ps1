@@ -2,7 +2,7 @@
 # 실행:  powershell -ExecutionPolicy Bypass -File build-userscript.ps1
 # 그다음 GitHub Desktop 에서 Commit → Push 하면 친구들에게 자동 업데이트된다.
 
-$Version   = "1.1.4"   # 마지막으로 만든 버전 (스크립트가 알아서 고침)
+$Version   = "1.1.5"   # 마지막으로 만든 버전 (스크립트가 알아서 고침)
 $UpdateUrl = "https://raw.githubusercontent.com/BlueSR10/eclass-auto/main/eclass-auto.user.js"
 
 $ErrorActionPreference = "Stop"

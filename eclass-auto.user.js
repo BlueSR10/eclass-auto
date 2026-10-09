@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eClass 영상 자동 넘기기
 // @namespace    astra-video-auto
-// @version      1.1.4
+// @version      1.1.5
 // @description  서울과기대 eClass 온라인 강의를 1배속으로 재생하고, 출석인정 시간을 채우면 출석(종료) 후 다음 영상을 자동으로 엽니다.
 // @match        https://eclass.seoultech.ac.kr/*
 // @run-at       document-start
@@ -21,7 +21,11 @@ window.__astraUserscript = true;
   const KEY_ON = "astraAuto.on";
   const KEY_TRIES = "astraAuto.tries";
   const KEY_NEED = "astraAuto.need"; // { title, sec }: 이번 영상에서 더 채워야 하는 시간
-  const MARGIN_SEC = 10; // 서버 저장 지연 대비 여유 (30초로 했을 때 실제로 46초 초과됨)
+  const KEY_LOG = "astraAuto.log"; // 최근 로그 (콘솔에서 __astraLog(), 또는 버튼 우클릭으로 저장)
+  const MAX_LOG = 300;
+  const RETRY_SEC = 10; // 여유 없이 출석을 눌렀다가 "시간 부족" 확인창이 뜨면 이만큼 뒤에 다시 누름
+  const RETRY_LATER_SEC = 60; // 그래도 또 부족하면 이만큼씩 더 기다림
+  const EXIT_DELAY_MS = 4000; // "곧 누릅니다" 알림을 띄우고 실제로 누르기까지
   const MAX_TRIES = 3; // 같은 영상을 이만큼 열어도 100%가 안 되면 건너뜀
   const TICK_MS = 2000;
 
@@ -30,24 +34,35 @@ window.__astraUserscript = true;
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
   };
   const isOn = () => store.get(KEY_ON, false);
-  const log = (...a) => console.log("[자동넘기기]", ...a);
+  // 콘솔은 화면이 바뀌면 지워지므로 localStorage에도 남긴다 (브라우저별로 따로 저장됨)
+  const log = (...a) => {
+    console.log("[자동넘기기]", ...a);
+    const lines = store.get(KEY_LOG, []);
+    lines.push(`${new Date().toLocaleString("sv")} ${a.map(String).join(" ")}`);
+    store.set(KEY_LOG, lines.slice(-MAX_LOG));
+  };
+  window.__astraLog = () => store.get(KEY_LOG, []).join("\n");
 
   const path = location.pathname;
   const isLearningPage = path.includes("/online/online_learning_form.acl");
   const isListPage = path.includes("/activity/activity_form.acl");
+  if (isOn() && (isLearningPage || isListPage)) {
+    log(`화면 열림: ${isLearningPage ? "영상" : "목록"} (${performance.getEntriesByType("navigation")[0]?.type || "?"})`);
+  }
 
   // ---- 직접 영상 목록에 들어오면 OFF ----------------------------------------
   // 매크로가 스스로 목록으로 돌아올 때는 직전에 표시를 남겨서 ON을 유지한다.
   const KEY_SELF_NAV = "astraAuto.selfNav";
   const markSelfNav = () => { try { sessionStorage.setItem(KEY_SELF_NAV, String(Date.now())); } catch {} };
-  const consumeSelfNav = () => {
+  // 표시는 지우지 않고 시간으로만 판단한다: 사이트가 뒤로가기로 들어온 목록을 한 번 더 새로고침해서
+  // (pageshow에서 location.reload) 목록이 연달아 두 번 열리기 때문. 한 번 쓰고 지우면 두 번째에 OFF가 된다.
+  const isSelfNav = () => {
     try {
       const t = Number(sessionStorage.getItem(KEY_SELF_NAV) || 0);
-      sessionStorage.removeItem(KEY_SELF_NAV);
       return Date.now() - t < 30000; // 30초 안에 남긴 표시만 인정
     } catch { return false; }
   };
-  if (isListPage && isOn() && !consumeSelfNav()) {
+  if (isListPage && isOn() && !isSelfNav()) {
     store.set(KEY_ON, false);
     log("직접 목록에 들어와서 OFF");
   }
@@ -88,7 +103,7 @@ window.__astraUserscript = true;
   });
 
   // ---- 화면 켜기/끄기 버튼 ------------------------------------------------
-  let btn, toastEl;
+  let btn, toastEl, menuEl;
   function renderButton() {
     if (!btn) return;
     const on = isOn();
@@ -104,8 +119,16 @@ window.__astraUserscript = true;
     store.set(KEY_ON, !isOn());
     if (isOn()) store.set(KEY_TRIES, {});
     renderButton();
+    log(isOn() ? "직접 켬" : "직접 끔");
     toast(isOn() ? "자동 넘기기를 켰어요" : "자동 넘기기를 껐어요");
   };
+  function saveLog() {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([window.__astraLog()], { type: "text/plain" }));
+    a.download = "eclass-auto-log.txt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
   function toast(text) {
     if (!toastEl) return;
     toastEl.textContent = text;
@@ -120,11 +143,44 @@ window.__astraUserscript = true;
       "position:fixed;right:16px;bottom:16px;z-index:2147483647;padding:10px 14px;border:0;border-radius:20px;" +
       "color:#fff;font:bold 14px sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)";
     btn.onclick = () => window.__astraToggle();
+    btn.title = "우클릭: 로그 메뉴";
+    // 우클릭 메뉴: 바로 내려받지 않고 고르게 한다
+    menuEl = document.createElement("div");
+    menuEl.style.cssText =
+      "position:fixed;right:16px;bottom:64px;z-index:2147483647;padding:4px;border-radius:8px;" +
+      "background:#222;box-shadow:0 2px 8px rgba(0,0,0,.4);display:none";
+    const addItem = (text, fn) => {
+      const item = document.createElement("button");
+      item.textContent = text;
+      item.style.cssText =
+        "display:block;width:100%;padding:8px 12px;border:0;border-radius:6px;background:none;" +
+        "color:#fff;font:13px sans-serif;text-align:left;cursor:pointer";
+      item.onmouseenter = () => (item.style.background = "#444");
+      item.onmouseleave = () => (item.style.background = "none");
+      item.onclick = () => { menuEl.style.display = "none"; fn(); };
+      menuEl.append(item);
+    };
+    addItem("남은 시간 보기", showLeft);
+    addItem("건너뛴 영상 다시 시도", () => { store.set(KEY_TRIES, {}); log("시도 횟수 초기화"); toast("건너뛴 영상을 다시 시도해요"); });
+    addItem("로그 기록 받기", saveLog);
+    addItem("로그 복사", () => {
+      navigator.clipboard.writeText(window.__astraLog()).then(
+        () => toast("로그를 복사했어요"),
+        () => toast("복사하지 못했어요. '로그 기록 받기'를 써 주세요"),
+      );
+    });
+    addItem("로그 지우기", () => { store.set(KEY_LOG, []); toast("로그를 지웠어요"); });
+    btn.oncontextmenu = (e) => {
+      e.preventDefault();
+      menuEl.style.display = menuEl.style.display === "none" ? "block" : "none";
+    };
+    // 메뉴 바깥을 누르면 닫음
+    document.addEventListener("click", (e) => { if (!menuEl.contains(e.target)) menuEl.style.display = "none"; });
     toastEl = document.createElement("div");
     toastEl.style.cssText =
       "position:fixed;right:16px;bottom:64px;z-index:2147483647;max-width:320px;padding:8px 12px;border-radius:8px;" +
       "background:rgba(0,0,0,.85);color:#fff;font:13px sans-serif;display:none;white-space:pre-wrap";
-    document.body.append(btn, toastEl);
+    document.body.append(btn, toastEl, menuEl);
     renderButton();
   }
 
@@ -135,6 +191,15 @@ window.__astraUserscript = true;
   const enteredAt = Date.now();
   let exiting = false;
   let exitAt = 0; // 이 시각이 되면 출석(종료). 0이면 채울 시간을 모름
+  let declines = 0; // "시간 부족" 확인창이 뜬 횟수
+  // 우클릭 메뉴 "남은 시간 보기"
+  function showLeft() {
+    if (!isLearningPage) return toast("영상 화면에서만 볼 수 있어요");
+    if (!isOn()) return toast("자동 넘기기가 꺼져 있어요");
+    if (!exitAt) return toast("채울 시간을 몰라서, 영상이 끝나면 출석(종료)를 눌러요");
+    const left = Math.max(Math.ceil((exitAt - Date.now()) / 1000), 0);
+    toast(`약 ${Math.floor(left / 60)}분 ${left % 60}초 뒤 출석(종료)를 눌러요`);
+  }
   function tickLearning() {
     const frame = document.getElementById("contentViewer");
     let video = null;
@@ -144,7 +209,7 @@ window.__astraUserscript = true;
       const need = store.get(KEY_NEED, null);
       const title = document.querySelector(".learning_title")?.textContent.trim();
       if (need && need.title === title) {
-        exitAt = enteredAt + (need.sec + MARGIN_SEC) * 1000;
+        exitAt = enteredAt + need.sec * 1000; // 여유 없이 딱 맞춰 누른다. 모자라면 아래에서 다시 시도
         const left = Math.max(Math.ceil((exitAt - Date.now()) / 1000), 0);
         log(`${left}초 뒤 출석(종료) 예정`);
         toast(`약 ${Math.floor(left / 60)}분 ${left % 60}초 뒤 출석(종료)를 눌러요`);
@@ -152,14 +217,17 @@ window.__astraUserscript = true;
     }
 
     if (shortTimeDeclined) {
-      // 계산보다 사이트 기록이 적었던 것 → 1분 더 머문 뒤 다시 시도
+      // 계산보다 사이트 기록이 적었던 것 → 처음엔 10초, 그 뒤로는 1분씩 더 머문 뒤 다시 시도
       shortTimeDeclined = false;
       exiting = false;
-      exitAt = Date.now() + 60000;
-      toast("출석인정 시간이 모자라서 1분 더 기다려요");
+      const wait = ++declines === 1 ? RETRY_SEC : RETRY_LATER_SEC;
+      exitAt = Date.now() + wait * 1000;
+      log(`시간 부족 ${declines}번째 → ${wait}초 뒤 다시 시도`);
+      toast(`출석인정 시간이 모자라서 ${wait}초 더 기다려요`);
     }
 
-    const timeFilled = exitAt > 0 && Date.now() >= exitAt;
+    // 알림을 먼저 띄우고 EXIT_DELAY_MS 뒤에 누르므로 그만큼 일찍 시작해야 exitAt에 눌린다
+    const timeFilled = exitAt > 0 && Date.now() >= exitAt - EXIT_DELAY_MS;
     // 채울 시간을 모를 때(목록을 거치지 않고 들어온 경우)만 영상이 끝나는 것을 기준으로 한다
     const videoEnded = !exitAt && !!video && (video.ended || video.currentTime >= video.duration - 0.5);
 
@@ -167,7 +235,6 @@ window.__astraUserscript = true;
       if (!exiting) {
         exiting = true;
         toast((timeFilled ? "출석인정 시간을 채웠어요" : "영상이 끝났어요") + ". 잠시 후 출석(종료)를 누릅니다");
-        // 학습시간이 서버에 저장될 여유를 두고 종료
         setTimeout(() => {
           if (!isOn()) { exiting = false; return; }
           log("출석(종료)");
@@ -175,7 +242,7 @@ window.__astraUserscript = true;
           if (typeof window.exitLearning === "function") window.exitLearning();
           // exitLearning이 확인창에서 거절되면 shortTimeDeclined가 켜지고 위에서 1분 더 기다림
           setTimeout(() => { if (!shortTimeDeclined) exiting = false; }, 5000);
-        }, 4000);
+        }, EXIT_DELAY_MS);
       }
       return;
     }
@@ -224,6 +291,7 @@ window.__astraUserscript = true;
         log(`영상 열기: ${title} (${pct}%)`);
         toast(`영상 열기: ${title}`);
         cooldownUntil = Date.now() + 10000;
+        markSelfNav(); // 영상을 열다가 사이트가 목록을 새로고침해도(2차 인증 확인 실패 등) OFF 되지 않게
         card.click();
         return;
       }
