@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eClass 영상 자동 넘기기
 // @namespace    astra-video-auto
-// @version      1.1.5
+// @version      1.1.6
 // @description  서울과기대 eClass 온라인 강의를 1배속으로 재생하고, 출석인정 시간을 채우면 출석(종료) 후 다음 영상을 자동으로 엽니다.
 // @match        https://eclass.seoultech.ac.kr/*
 // @run-at       document-start
@@ -15,6 +15,7 @@
 window.__astraUserscript = true;
 
 // 서울과기대 eClass 영상 자동 넘기기
+// - 강의실 첫 화면: 아직 안 끝난 첫 영상 항목으로 들어간다.
 // - 목록 화면: 100%가 아닌 첫 영상을 연다. 다 봤으면 왼쪽 목록의 다음 "영상" 항목으로 넘어간다.
 // - 학습 화면: 출석인정에 모자란 시간만큼 머문 뒤 출석(종료)를 누른다. (학습시간은 재생과 무관하게 쌓임)
 (() => {
@@ -46,8 +47,10 @@ window.__astraUserscript = true;
   const path = location.pathname;
   const isLearningPage = path.includes("/online/online_learning_form.acl");
   const isListPage = path.includes("/activity/activity_form.acl");
-  if (isOn() && (isLearningPage || isListPage)) {
-    log(`화면 열림: ${isLearningPage ? "영상" : "목록"} (${performance.getEntriesByType("navigation")[0]?.type || "?"})`);
+  const isHomePage = path.includes("/submain/submain_form.acl"); // 강의실 첫 화면
+  if (isOn() && (isLearningPage || isListPage || isHomePage)) {
+    const name = isLearningPage ? "영상" : isListPage ? "목록" : "강의실";
+    log(`화면 열림: ${name} (${performance.getEntriesByType("navigation")[0]?.type || "?"})`);
   }
 
   // ---- 직접 영상 목록에 들어오면 OFF ----------------------------------------
@@ -62,9 +65,9 @@ window.__astraUserscript = true;
       return Date.now() - t < 30000; // 30초 안에 남긴 표시만 인정
     } catch { return false; }
   };
-  if (isListPage && isOn() && !isSelfNav()) {
+  if ((isListPage || isHomePage) && isOn() && !isSelfNav()) {
     store.set(KEY_ON, false);
-    log("직접 목록에 들어와서 OFF");
+    log(isListPage ? "직접 목록에 들어와서 OFF" : "직접 강의실에 들어와서 OFF");
   }
   // 왼쪽 회차 목록을 사람이 직접 클릭해도 OFF (매크로의 click()은 isTrusted가 false)
   document.addEventListener("click", (e) => {
@@ -109,10 +112,10 @@ window.__astraUserscript = true;
     const on = isOn();
     btn.textContent = on ? "자동 넘기기 ON" : "자동 넘기기 OFF";
     btn.style.background = on ? "#1e8e5a" : "#555";
-    // 매크로가 일하는 화면에서만 보임: 영상 목록 화면(항상), 영상 화면(켜져 있을 때만).
+    // 매크로가 일하는 화면에서만 보임: 강의실 첫 화면·영상 목록 화면(항상), 영상 화면(켜져 있을 때만).
     // 메인 등 그 외 화면에선 숨김. 켜기/끄기는 확장 아이콘 / Alt+Shift+A로도 가능
     const onListPage = !!document.getElementById("class_activity_list");
-    btn.style.display = onListPage || (isLearningPage && on) ? "block" : "none";
+    btn.style.display = onListPage || isHomePage || (isLearningPage && on) ? "block" : "none";
   }
   // 확장 아이콘 클릭 / 단축키에서 호출됨 (background.js)
   window.__astraToggle = () => {
@@ -257,6 +260,33 @@ window.__astraUserscript = true;
     }
   }
 
+  // ---- 강의실 첫 화면 ------------------------------------------------------
+  // 아직 안 끝난 첫 영상 항목(목록 화면으로 가는 링크)을 연다. 그 뒤는 목록 화면 쪽이 이어받는다.
+  let homeTicks = 0;
+  function tickHome() {
+    if (Date.now() < cooldownUntil) return;
+    const vids = [...document.querySelectorAll("a.week_activity.week_activity_lecture_weeks")];
+    // 항목이 아직 안 그려졌을 수 있으니 잠깐 기다려 보고, 그래도 없으면 영상이 없는 과목
+    if (!vids.length && ++homeTicks < 5) return;
+    // 완료한 항목엔 체크(.submit_check)가 붙는다. 아직 시작 전인 항목은 "시작" 칸에 D-nn이 붙는다
+    const notStarted = (a) => [...a.querySelectorAll(".activity_info")].some(
+      (i) => i.querySelector(".activity_info_title")?.textContent.trim() === "시작" && i.querySelector(".activity_info_error_text"));
+    const next = vids.find((a) => !a.querySelector(".submit_check") && !notStarted(a));
+    if (next) {
+      const name = next.querySelector(".activity_title")?.textContent.trim();
+      log("강의실에서 영상 항목으로:", name);
+      toast(`영상 항목으로: ${name}`);
+      cooldownUntil = Date.now() + 10000;
+      markSelfNav(); // 목록으로 넘어가도 OFF 되지 않게
+      next.click();
+      return;
+    }
+    store.set(KEY_ON, false);
+    renderButton();
+    toast(vids.length ? "이 과목의 영상을 모두 봤어요! 자동 넘기기를 껐어요" : "이 과목엔 볼 영상이 없어요. 자동 넘기기를 껐어요");
+    log(vids.length ? "완료(강의실)" : "영상 없음(강의실)");
+  }
+
   // ---- 목록 화면 ----------------------------------------------------------
   // "1:38:27" / "25:00" → 초
   const toSec = (t) => (t && /^[\d:]+$/.test(t) ? t.split(":").reduce((s, n) => s * 60 + Number(n), 0) : 0);
@@ -340,7 +370,7 @@ window.__astraUserscript = true;
       hookKeys();
       renderButton(); // 화면이 바뀌어도(목록 ↔ 다른 곳) 버튼 표시를 맞춤
       if (!isOn()) return;
-      try { isLearningPage ? tickLearning() : tickList(); } catch (e) { log("오류", e); }
+      try { isLearningPage ? tickLearning() : isHomePage ? tickHome() : tickList(); } catch (e) { log("오류", e); }
     }, TICK_MS);
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
