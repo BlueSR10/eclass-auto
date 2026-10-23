@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eClass 영상 자동 넘기기
 // @namespace    astra-video-auto
-// @version      1.1.6
+// @version      1.1.7
 // @description  서울과기대 eClass 온라인 강의를 1배속으로 재생하고, 출석인정 시간을 채우면 출석(종료) 후 다음 영상을 자동으로 엽니다.
 // @match        https://eclass.seoultech.ac.kr/*
 // @run-at       document-start
@@ -21,6 +21,7 @@ window.__astraUserscript = true;
 (() => {
   const KEY_ON = "astraAuto.on";
   const KEY_TRIES = "astraAuto.tries";
+  const KEY_FROM_TOP = "astraAuto.fromTop"; // true: 켤 때 지금 항목 대신 맨 위의 안 본 영상 항목부터 시작
   const KEY_NEED = "astraAuto.need"; // { title, sec }: 이번 영상에서 더 채워야 하는 시간
   const KEY_LOG = "astraAuto.log"; // 최근 로그 (콘솔에서 __astraLog(), 또는 버튼 우클릭으로 저장)
   const MAX_LOG = 300;
@@ -65,6 +66,10 @@ window.__astraUserscript = true;
       return Date.now() - t < 30000; // 30초 안에 남긴 표시만 인정
     } catch { return false; }
   };
+  // 사람이 직접 누르거나 키를 치면 표시를 지운다: 그 뒤의 이동은 사람이 한 것이므로 막지 않고 OFF 되게
+  const clearSelfNav = (e) => { if (e.isTrusted) try { sessionStorage.removeItem(KEY_SELF_NAV); } catch {} };
+  document.addEventListener("pointerdown", clearSelfNav, true);
+  document.addEventListener("keydown", clearSelfNav, true);
   if ((isListPage || isHomePage) && isOn() && !isSelfNav()) {
     store.set(KEY_ON, false);
     log(isListPage ? "직접 목록에 들어와서 OFF" : "직접 강의실에 들어와서 OFF");
@@ -80,12 +85,15 @@ window.__astraUserscript = true;
 
   // ---- 확인창 자동 처리 ----------------------------------------------------
   let shortTimeDeclined = false;
+  let macroExiting = false; // 매크로가 출석(종료)를 누르는 중일 때만 true
   const origConfirm = window.confirm.bind(window);
   const origAlert = window.alert.bind(window);
   window.confirm = (msg = "") => {
     if (!isOn()) return origConfirm(msg);
-    // 출석인정 시간이 모자란데 나가려는 경우 → 나가지 않고 다시 재생
+    // 출석인정 시간이 모자란데 나가려는 경우 → 나가지 않고 다시 재생.
+    // 사람이 직접 출석(종료)를 누른 거라면 막지 않고 원래 확인창을 띄운다
     if (msg.includes("출석인정시간보다 적습니다")) {
+      if (!macroExiting) return origConfirm(msg);
       log("출석인정 시간 부족 → 나가지 않음");
       shortTimeDeclined = true;
       return false;
@@ -121,6 +129,7 @@ window.__astraUserscript = true;
   window.__astraToggle = () => {
     store.set(KEY_ON, !isOn());
     if (isOn()) store.set(KEY_TRIES, {});
+    jumpToTop = isOn() && store.get(KEY_FROM_TOP, false);
     renderButton();
     log(isOn() ? "직접 켬" : "직접 끔");
     toast(isOn() ? "자동 넘기기를 켰어요" : "자동 넘기기를 껐어요");
@@ -162,7 +171,14 @@ window.__astraUserscript = true;
       item.onmouseleave = () => (item.style.background = "none");
       item.onclick = () => { menuEl.style.display = "none"; fn(); };
       menuEl.append(item);
+      return item;
     };
+    const fromTopLabel = () => (store.get(KEY_FROM_TOP, false) ? "시작 위치: 맨 위 안 본 영상부터" : "시작 위치: 지금 항목부터");
+    const fromTopItem = addItem(fromTopLabel(), () => {
+      store.set(KEY_FROM_TOP, !store.get(KEY_FROM_TOP, false));
+      fromTopItem.textContent = fromTopLabel();
+      toast(store.get(KEY_FROM_TOP, false) ? "켜면 맨 위의 안 본 영상부터 시작해요" : "켜면 지금 항목부터 시작해요");
+    });
     addItem("남은 시간 보기", showLeft);
     addItem("건너뛴 영상 다시 시도", () => { store.set(KEY_TRIES, {}); log("시도 횟수 초기화"); toast("건너뛴 영상을 다시 시도해요"); });
     addItem("로그 기록 받기", saveLog);
@@ -242,7 +258,9 @@ window.__astraUserscript = true;
           if (!isOn()) { exiting = false; return; }
           log("출석(종료)");
           markSelfNav(); // 목록으로 돌아가도 OFF 되지 않게
-          if (typeof window.exitLearning === "function") window.exitLearning();
+          // exitLearning의 확인창은 동기로 뜨므로 이 사이에 뜬 것만 매크로 것으로 본다
+          macroExiting = true;
+          try { if (typeof window.exitLearning === "function") window.exitLearning(); } finally { macroExiting = false; }
           // exitLearning이 확인창에서 거절되면 shortTimeDeclined가 켜지고 위에서 1분 더 기다림
           setTimeout(() => { if (!shortTimeDeclined) exiting = false; }, 5000);
         }, EXIT_DELAY_MS);
@@ -291,6 +309,7 @@ window.__astraUserscript = true;
   // "1:38:27" / "25:00" → 초
   const toSec = (t) => (t && /^[\d:]+$/.test(t) ? t.split(":").reduce((s, n) => s * 60 + Number(n), 0) : 0);
   let cooldownUntil = 0;
+  let jumpToTop = false; // 켠 직후 한 번만: 맨 위의 안 본 영상 항목으로 이동 (설정 "시작 위치")
   function tickList() {
     if (Date.now() < cooldownUntil) return;
     const sideItems = [...document.querySelectorAll("#class_activity_list a.activity")];
@@ -302,6 +321,21 @@ window.__astraUserscript = true;
 
     // 선택된 항목이 영상인데 아직 목록이 안 그려졌으면 기다림
     if (onVideoActivity && !cards.length) return;
+
+    // 켠 직후 한 번만 위쪽의 안 본 영상 항목으로 간다. 그 뒤는 평소처럼 아래로 내려간다.
+    // (매번 하면 3번 시도로 건너뛴 영상이 있는 위 항목으로 계속 되돌아가므로 한 번만)
+    if (jumpToTop) {
+      jumpToTop = false;
+      const top = sideItems.find((a) => a.classList.contains("activity_lecture_weeks") && a.classList.contains("not_submit"));
+      if (top && top !== selected) {
+        const name = top.querySelector(".activity_title")?.textContent.trim();
+        log("맨 위 안 본 항목으로:", name);
+        toast(`맨 위 안 본 항목으로: ${name}`);
+        cooldownUntil = Date.now() + 8000;
+        top.click();
+        return;
+      }
+    }
 
     if (onVideoActivity) {
       const tries = store.get(KEY_TRIES, {});
