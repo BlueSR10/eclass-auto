@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eClass 영상 자동 넘기기
 // @namespace    astra-video-auto
-// @version      1.1.7
+// @version      1.1.8
 // @description  서울과기대 eClass 온라인 강의를 1배속으로 재생하고, 출석인정 시간을 채우면 출석(종료) 후 다음 영상을 자동으로 엽니다.
 // @match        https://eclass.seoultech.ac.kr/*
 // @run-at       document-start
@@ -15,6 +15,7 @@
 window.__astraUserscript = true;
 
 // 서울과기대 eClass 영상 자동 넘기기
+// - 홈 화면: 오른쪽 "할일"에 뜬 영상 항목으로 들어간다. 홈에서 켰으면 한 과목이 끝나도 홈으로 돌아와 다른 과목까지 본다.
 // - 강의실 첫 화면: 아직 안 끝난 첫 영상 항목으로 들어간다.
 // - 목록 화면: 100%가 아닌 첫 영상을 연다. 다 봤으면 왼쪽 목록의 다음 "영상" 항목으로 넘어간다.
 // - 학습 화면: 출석인정에 모자란 시간만큼 머문 뒤 출석(종료)를 누른다. (학습시간은 재생과 무관하게 쌓임)
@@ -22,6 +23,7 @@ window.__astraUserscript = true;
   const KEY_ON = "astraAuto.on";
   const KEY_TRIES = "astraAuto.tries";
   const KEY_FROM_TOP = "astraAuto.fromTop"; // true: 켤 때 지금 항목 대신 맨 위의 안 본 영상 항목부터 시작
+  const KEY_ALL = "astraAuto.all"; // true: 홈 화면에서 켬 → 한 과목이 끝나면 홈으로 돌아가 다른 과목도 본다
   const KEY_NEED = "astraAuto.need"; // { title, sec }: 이번 영상에서 더 채워야 하는 시간
   const KEY_LOG = "astraAuto.log"; // 최근 로그 (콘솔에서 __astraLog(), 또는 버튼 우클릭으로 저장)
   const MAX_LOG = 300;
@@ -49,8 +51,10 @@ window.__astraUserscript = true;
   const isLearningPage = path.includes("/online/online_learning_form.acl");
   const isListPage = path.includes("/activity/activity_form.acl");
   const isHomePage = path.includes("/submain/submain_form.acl"); // 강의실 첫 화면
-  if (isOn() && (isLearningPage || isListPage || isHomePage)) {
-    const name = isLearningPage ? "영상" : isListPage ? "목록" : "강의실";
+  const isMainPage = path.includes("/main/main_form.acl"); // 로그인 후 홈 화면 (달력 + 오른쪽 할일)
+  const MAIN_URL = "/ilos/main/main_form.acl";
+  if (isOn() && (isLearningPage || isListPage || isHomePage || isMainPage)) {
+    const name = isLearningPage ? "영상" : isListPage ? "목록" : isHomePage ? "강의실" : "홈";
     log(`화면 열림: ${name} (${performance.getEntriesByType("navigation")[0]?.type || "?"})`);
   }
 
@@ -70,9 +74,9 @@ window.__astraUserscript = true;
   const clearSelfNav = (e) => { if (e.isTrusted) try { sessionStorage.removeItem(KEY_SELF_NAV); } catch {} };
   document.addEventListener("pointerdown", clearSelfNav, true);
   document.addEventListener("keydown", clearSelfNav, true);
-  if ((isListPage || isHomePage) && isOn() && !isSelfNav()) {
+  if ((isListPage || isHomePage || isMainPage) && isOn() && !isSelfNav()) {
     store.set(KEY_ON, false);
-    log(isListPage ? "직접 목록에 들어와서 OFF" : "직접 강의실에 들어와서 OFF");
+    log(isListPage ? "직접 목록에 들어와서 OFF" : isHomePage ? "직접 강의실에 들어와서 OFF" : "직접 홈에 들어와서 OFF");
   }
   // 왼쪽 회차 목록을 사람이 직접 클릭해도 OFF (매크로의 click()은 isTrusted가 false)
   document.addEventListener("click", (e) => {
@@ -86,9 +90,16 @@ window.__astraUserscript = true;
   // ---- 확인창 자동 처리 ----------------------------------------------------
   let shortTimeDeclined = false;
   let macroExiting = false; // 매크로가 출석(종료)를 누르는 중일 때만 true
+  let userExiting = false; // 사람이 직접 출석(종료)를 누르는 중일 때만 true
   const origConfirm = window.confirm.bind(window);
   const origAlert = window.alert.bind(window);
   window.confirm = (msg = "") => {
+    // 사람이 나가기를 눌러 이미 OFF로 바꿔 둔 상태. 확인창에서 취소해서 안 나가면 다시 ON
+    if (userExiting) {
+      const ok = origConfirm(msg);
+      if (!ok) { store.set(KEY_ON, true); renderButton(); log("나가기 취소 → 다시 ON"); }
+      return ok;
+    }
     if (!isOn()) return origConfirm(msg);
     // 출석인정 시간이 모자란데 나가려는 경우 → 나가지 않고 다시 재생.
     // 사람이 직접 출석(종료)를 누른 거라면 막지 않고 원래 확인창을 띄운다
@@ -120,15 +131,18 @@ window.__astraUserscript = true;
     const on = isOn();
     btn.textContent = on ? "자동 넘기기 ON" : "자동 넘기기 OFF";
     btn.style.background = on ? "#1e8e5a" : "#555";
-    // 매크로가 일하는 화면에서만 보임: 강의실 첫 화면·영상 목록 화면(항상), 영상 화면(켜져 있을 때만).
+    // 매크로가 일하는 화면에서만 보임: 홈·강의실 첫 화면·영상 목록 화면(항상), 영상 화면(켜져 있을 때만).
     // 메인 등 그 외 화면에선 숨김. 켜기/끄기는 확장 아이콘 / Alt+Shift+A로도 가능
     const onListPage = !!document.getElementById("class_activity_list");
-    btn.style.display = onListPage || isHomePage || (isLearningPage && on) ? "block" : "none";
+    btn.style.display = onListPage || isHomePage || isMainPage || (isLearningPage && on) ? "block" : "none";
   }
   // 확장 아이콘 클릭 / 단축키에서 호출됨 (background.js)
   window.__astraToggle = () => {
     store.set(KEY_ON, !isOn());
-    if (isOn()) store.set(KEY_TRIES, {});
+    if (isOn()) {
+      store.set(KEY_TRIES, {});
+      store.set(KEY_ALL, isMainPage); // 홈에서 켰을 때만 모든 과목
+    }
     jumpToTop = isOn() && store.get(KEY_FROM_TOP, false);
     renderButton();
     log(isOn() ? "직접 켬" : "직접 끔");
@@ -278,6 +292,22 @@ window.__astraUserscript = true;
     }
   }
 
+  // 사람이 직접 출석(종료)를 누르면 OFF. 버튼은 전역 exitLearning()을 부르므로 그걸 감싼다
+  function hookExit() {
+    const orig = window.exitLearning;
+    if (!isLearningPage || typeof orig !== "function" || orig.__astra) return;
+    const wrapped = function (...args) {
+      if (macroExiting || !isOn()) return orig.apply(this, args);
+      store.set(KEY_ON, false);
+      renderButton();
+      log("직접 출석(종료)를 눌러서 OFF");
+      userExiting = true;
+      try { return orig.apply(this, args); } finally { userExiting = false; }
+    };
+    wrapped.__astra = true;
+    window.exitLearning = wrapped;
+  }
+
   // ---- 강의실 첫 화면 ------------------------------------------------------
   // 아직 안 끝난 첫 영상 항목(목록 화면으로 가는 링크)을 연다. 그 뒤는 목록 화면 쪽이 이어받는다.
   let homeTicks = 0;
@@ -299,10 +329,52 @@ window.__astraUserscript = true;
       next.click();
       return;
     }
+    if (goMainIfAll()) return;
     store.set(KEY_ON, false);
     renderButton();
     toast(vids.length ? "이 과목의 영상을 모두 봤어요! 자동 넘기기를 껐어요" : "이 과목엔 볼 영상이 없어요. 자동 넘기기를 껐어요");
     log(vids.length ? "완료(강의실)" : "영상 없음(강의실)");
+  }
+
+  // ---- 홈 화면 -------------------------------------------------------------
+  // 오른쪽 "할일"에서 영상 항목을 누르면 그 과목 목록 화면의 해당 항목으로 바로 간다. 그 뒤는 목록 화면 쪽이 이어받는다.
+  let mainTicks = 0;
+  function tickMain() {
+    if (Date.now() < cooldownUntil) return;
+    const items = [...document.querySelectorAll("#aside_todo_zone a.aside_list_todo_item")];
+    if (!items.length && ++mainTicks < 5) return; // 할일이 아직 안 그려졌을 수 있음
+    const tries = store.get(KEY_TRIES, {});
+    const keyOf = (a) => "할일:" + ["info", "title"].map((c) => a.querySelector(`.aside_list_${c}`)?.textContent.trim()).join(" ");
+    // 항목 위쪽에 "영상" / "과제" 등 종류가 적혀 있다
+    const vids = items.filter((a) => a.querySelector(".aside_list_top")?.textContent.includes("영상"));
+    for (const a of vids) {
+      const key = keyOf(a);
+      // 들어가도 끝나지 않는 항목(건너뛴 영상 등)이 할일에 계속 남으므로 몇 번 들어가 보고 건너뜀
+      if ((tries[key] || 0) >= MAX_TRIES) { log("건너뜀(시도 초과):", key); continue; }
+      tries[key] = (tries[key] || 0) + 1;
+      store.set(KEY_TRIES, tries);
+      store.set(KEY_ALL, true);
+      log("홈에서 할일로:", key);
+      toast(`할일 영상으로: ${a.querySelector(".aside_list_title")?.textContent.trim()}`);
+      cooldownUntil = Date.now() + 10000;
+      markSelfNav(); // 목록으로 넘어가도 OFF 되지 않게
+      a.click();
+      return;
+    }
+    store.set(KEY_ON, false);
+    renderButton();
+    toast(vids.length ? "남은 할일 영상은 여러 번 시도해도 안 끝나서 껐어요" : "할일에 안 본 영상이 없어요! 자동 넘기기를 껐어요");
+    log(vids.length ? "완료(홈, 건너뛴 항목 있음)" : "완료(홈)");
+  }
+  // 홈에서 켠 경우: 한 과목이 끝나면 끄지 않고 홈으로 돌아가 다른 과목 할일을 찾는다
+  function goMainIfAll() {
+    if (!store.get(KEY_ALL, false)) return false;
+    log("과목 끝 → 홈으로");
+    toast("이 과목은 끝났어요. 홈에서 다른 과목을 찾아요");
+    cooldownUntil = Date.now() + 10000;
+    markSelfNav();
+    location.href = MAIN_URL;
+    return true;
   }
 
   // ---- 목록 화면 ----------------------------------------------------------
@@ -376,6 +448,7 @@ window.__astraUserscript = true;
       return;
     }
 
+    if (goMainIfAll()) return;
     store.set(KEY_ON, false);
     renderButton();
     toast("이 과목의 영상을 모두 봤어요! 자동 넘기기를 껐어요");
@@ -402,9 +475,10 @@ window.__astraUserscript = true;
     mountUI();
     setInterval(() => {
       hookKeys();
+      hookExit();
       renderButton(); // 화면이 바뀌어도(목록 ↔ 다른 곳) 버튼 표시를 맞춤
       if (!isOn()) return;
-      try { isLearningPage ? tickLearning() : isHomePage ? tickHome() : tickList(); } catch (e) { log("오류", e); }
+      try { isLearningPage ? tickLearning() : isHomePage ? tickHome() : isMainPage ? tickMain() : tickList(); } catch (e) { log("오류", e); }
     }, TICK_MS);
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
